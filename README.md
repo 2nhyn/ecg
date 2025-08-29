@@ -1,186 +1,162 @@
-# Python example code for the George B. Moody PhysioNet Challenge 2025
+# ECG Contrastive + Linear Probe Classifier
 
-## What's in this repository?
+## 1) Overview
 
-This repository contains a simple example that illustrates how to format a Python entry for the [George B. Moody PhysioNet Challenge 2025](https://physionetchallenges.org/2025/). If you are participating in the 2025 Challenge, then we recommend using this repository as a template for your entry. You can remove some of the code, reuse other code, and add new code to create your entry. You do not need to use the models, features, and/or libraries in this example for your entry. We encourage a diversity of approaches to the Challenges.
+This project takes **12-lead ECG** signals as input and follows a two-stage pipeline:
 
-For this example, we implemented a random forest model with several simple features. (This simple example is **not** designed to perform well, so you should **not** use it as a baseline for your approach's performance.) You can try it by running the following commands on the Challenge training set. If you are using a relatively recent personal computer, then you should be able to run these commands from start to finish on a small subset (1000 records) of the training data in a few minutes or less.
+1. **Contrastive Pretraining** (self-supervised learning)
+2. **Linear Probe Supervised Fine-tuning**
 
-## How do I run these scripts?
+to perform binary classification.
 
-First, you can download and create data for these scripts by following the [instructions](https://github.com/physionetchallenges/python-example-2025?tab=readme-ov-file#how-do-i-create-data-for-these-scripts) in the following section.
+* Input length: variable length → unified by padding/clipping (4096)
+* Sampling rate: resampled to **400 Hz**
+* Core model: `ResNet1D + SE Block + Transformer Block` encoder, trained contrastively and then fine-tuned with a linear probe classifier
 
-Second, you can install the dependencies for these scripts by creating a Docker image (see below) or [virtual environment](https://docs.python.org/3/library/venv.html) and running
+All hyperparameters are decided empirically
+---
 
-    pip install -r requirements.txt
+## 2) Preprocessing
 
-You can train your model by running
+### `SignalProcessor`
 
-    python train_model.py -d training_data -m model
+* Resample (→ 400 Hz)
+* Replace NaNs with finite values
+* **Bandpass filter**: 0.5–45 Hz (4th-order Butterworth)
+* **Notch filter**: 60 Hz powerline noise removal
 
-where
+### Normalization
 
-- `training_data` (input; required) is a folder with the training data files, which must include the labels; and
-- `model` (output; required) is a folder for saving your model.
+```python
+def normalize_leads(arr):
+    (arr - mean) / std  # per-lead normalization
+```
 
-You can run your trained model by running
+### Padding
 
-    python run_model.py -d holdout_data -m model -o holdout_outputs
+* Pad all samples to shape `(max_len, num_leads)`
 
-where
+---
 
-- `holdout_data` (input; required) is a folder with the holdout data files, which will not necessarily include the labels;
-- `model` (input; required) is a folder for loading your model; and
-- `holdout_outputs` (output; required) is a folder for saving your model outputs.
+## 3) Data Augmentation (`augment_signal_v2`)
 
-The [Challenge website](https://physionetchallenges.org/2025/#data) provides a training database with a description of the contents and structure of the data files.
+* Add Gaussian noise
+* Random scaling (0.9 \~ 1.1)
+* Time masking (mask 10% of the signal with zeros)
+* Random temporal shift (±5 samples)
 
-You can evaluate your model by pulling or downloading the [evaluation code](https://github.com/physionetchallenges/evaluation-2025) and running
+Used to generate two augmented views (v1, v2) for contrastive learning.
 
-    python evaluate_model.py -d holdout_data -o holdout_outputs -s scores.csv
+---
 
-where
+## 4) Dataset Classes
 
-- `holdout_data`(input; required) is a folder with labels for the holdout data files, which must include the labels;
-- `holdout_outputs` (input; required) is a folder containing files with your model's outputs for the data; and
-- `scores.csv` (output; optional) is file with a collection of scores for your model.
+* **ContrastiveECGDataset**:
+  Takes one ECG signal and applies `augment_signal_v2` twice → returns (v1, v2).
 
-You can use the provided training set for the `training_data` and `holdout_data` files, but we will use different datasets for the validation and test sets, and we will not provide the labels to your code.
+* **SupervisedECGDataset**:
+  Returns (signal, label) pairs → used for linear probe training.
 
-## How do I create data for these scripts?
+---
 
-You can use the scripts in this repository to convert the [CODE-15% dataset](https://zenodo.org/records/4916206), the [SaMi-Trop dataset](https://zenodo.org/records/4905618), and the [PTB-XL dataset](https://physionet.org/content/ptb-xl/) to [WFDB](https://wfdb.io/) format.
+## 5) Model Architecture
 
-Please see the [data](https://physionetchallenges.org/2025/#data) section of the website for more information about the Challenge data.
+### (1) SEBlock1D
 
-#### CODE-15% dataset
+* **Squeeze-and-Excitation** module (channel-wise attention)
+* Global Average Pooling → Conv1d(reduction) → ReLU → Conv1d → Sigmoid
 
-These instructions use `code15_input` as the path for the input data files and `code15_output` for the output data files, but you can replace them with the absolute or relative paths for the files on your machine.
+### (2) TransformerBlock1D
 
-1. Download and unzip one or more of the `exam_part` files and the `exams.csv` file in the [CODE-15% dataset](https://zenodo.org/records/4916206).
+* Multihead Self-Attention (`nn.MultiheadAttention`)
+* LayerNorm + residual connections
+* Position-wise MLP (Linear → GELU → Linear)
 
-2. Download and unzip the Chagas labels, i.e., the [`code15_chagas_labels.csv`](https://physionetchallenges.org/2025/data/code15_chagas_labels.zip) file.
+### (3) BasicBlock1D
 
-3. Convert the CODE-15% dataset to WFDB format, with the available demographics information and Chagas labels in the WFDB header file, by running
+* ResNet-style 1D convolutional block
+* Conv-BN-ReLU → Conv-BN → SEBlock → Residual connection
 
-        python prepare_code15_data.py \
-            -i code15_input/exams_part0.hdf5 code15_input/exams_part1.hdf5 \
-            -d code15_input/exams.csv \
-            -l code15_input/code15_chagas_labels.csv \
-            -o code15_output/exams_part0 code15_output/exams_part1
+### (4) ResNet1DEncoder
 
-Each `exam_part` file in the [CODE-15% dataset](https://zenodo.org/records/4916206) contains approximately 20,000 ECG recordings. You can include more or fewer of these files to increase or decrease the number of ECG recordings, respectively. You may want to start with fewer ECG recordings to debug your code.
+* Stem: Conv(7x1, stride=2) + BN + ReLU + MaxPool
+* Layer1–4: ResNet blocks (64 → 128 → 256 → 512)
+* Global Avg Pooling → TransformerBlock → Projection Head
 
-#### SaMi-Trop dataset
+Outputs:
 
-These instructions use `samitrop_input` as the path for the input data files and `samitrop_output` for the output data files, but you can replace them with the absolute or relative paths for the files on your machine.
+* `x`: encoder feature (512-d)
+* `z`: projection head embedding (contrastive learning, normalized)
 
-1. Download and unzip `exams.zip` file and the `exams.csv` file in the [SaMi-Trop dataset](https://zenodo.org/records/4905618).
+---
 
-2. Convert the SaMi-Trop dataset to WFDB format, with the available demographics information and Chagas labels in the WFDB header file, by running
+## 6) Contrastive Loss: NT-Xent
 
-        python prepare_samitrop_data.py \
-            -i samitrop_input/exams.hdf5 \
-            -d samitrop_input/exams.csv \
-            -o samitrop_output
+* Input: `z1`, `z2` (augmentation pair)
+* Positive pairs: different views of the same sample
+* Negative pairs: all other samples in the batch
+* Softmax + CrossEntropy-based loss
 
-#### PTB-XL dataset
+---
 
-These instructions use `ptbxl_input` as the path for the input data files and `ptbxl_output` for the output data files, but you can replace them with the absolute or relative paths for the files on your machine. We are using the `records500` folder, which has a 500Hz sampling frequency, but you can also try the `records100` folder, which has a 100Hz sampling frequency.
+## 7) Linear Probe Classifier
 
-1. Download and, if necessary, unzip the [PTB-XL dataset](https://physionet.org/content/ptb-xl/).
+### LinearProbeHead
 
-2. Update the WFDB files with the available demographics information and Chagas labels by running
+* 2-layer MLP:
 
-        python prepare_ptbxl_data.py \
-            -i ptbxl_input/records500/ \
-            -d ptbxl_input/ptbxl_database.csv \
-            -o ptbxl_output
+  * Input: encoder feature (512-d)
+  * Hidden: 128-d
+  * Output: `num_classes` (default=2)
 
-## Which scripts I can edit?
+### LinearProbeTrainer
 
-Please edit the following script to add your code:
+* Encoder is **frozen**; only the linear head is trained
+* Optimizer: Adam (`lr=1e-4`)
+* Loss: Weighted CrossEntropy
 
-* `team_code.py` is a script with functions for training and running your trained model.
+  * `class_weights = [0.5, 1.0]` (to address class imbalance)
+* Model saving: `torch.save(self.head.state_dict(), save_path)`
 
-Please do **not** edit the following scripts. We will use the unedited versions of these scripts when running your code:
+---
 
-* `train_model.py` is a script for training your model.
-* `run_model.py` is a script for running your trained model.
-* `helper_code.py` is a script with helper functions that we used for our code. You are welcome to use them in your code.
+## 8) Training Flow
 
-These scripts must remain in the root path of your repository, but you can put other scripts and other files elsewhere in your repository.
+### Phase 1: Contrastive Pretraining
 
-## How do I train, save, load, and run my model?
+1. Apply augmentations to ECG signal → create (v1, v2) pairs
+2. Pass through encoder + projection head
+3. Train using NT-Xent loss
 
-To train and save your model, please edit the `train_model` function in the `team_code.py` script. Please do not edit the input or output arguments of this function.
+### Phase 2: Linear Probe Fine-tuning
 
-To load and run your trained model, please edit the `load_model` and `run_model` functions in the `team_code.py` script. Please do not edit the input or output arguments of these functions.
+1. Freeze encoder
+2. Load labeled ECG data via `SupervisedECGDataset`
+3. Train only the linear probe head with CrossEntropyLoss
 
-## How do I run these scripts in Docker?
+---
 
-Docker and similar platforms allow you to containerize and package your code with specific dependencies so that your code can be reliably run in other computational environments.
+## 9) Key Design Choices
 
-To increase the likelihood that we can run your code, please [install](https://docs.docker.com/get-docker/) Docker, build a Docker image from your code, and run it on the training data. To quickly check your code for bugs, you may want to run it on a small subset of the training data, such as 1000 records.
+* **ResNet + SEBlock + Transformer**: combines local pattern extraction, channel attention, and global dependencies
+* Contrastive pretraining improves generalization on limited/noisy labels
+* Linear probe allows efficient use of labels
+* Design considers ECG-specific challenges (noise, variability, varying sequence lengths)
 
-If you have trouble running your code, then please try the follow steps to run the example code.
+---
 
-1. Create a folder `example` in your home directory with several subfolders.
+## 10) Minimal Example
 
-        user@computer:~$ cd ~/
-        user@computer:~$ mkdir example
-        user@computer:~$ cd example
-        user@computer:~/example$ mkdir training_data holdout_data model holdout_outputs
+```python
+# Pretrain contrastive
+dataset = ContrastiveECGDataset(signals)
+loader = DataLoader(dataset, batch_size=64, shuffle=True)
+encoder = ResNet1DEncoder(in_ch=12)
 
-2. Download the training data from the [Challenge website](https://physionetchallenges.org/2025/#data). Put some of the training data in `training_data` and `holdout_data`. You can use some of the training data to check your code (and you should perform cross-validation on the training data to evaluate your algorithm).
-
-3. Download or clone this repository in your terminal.
-
-        user@computer:~/example$ git clone https://github.com/physionetchallenges/python-example-2025.git
-
-4. Build a Docker image and run the example code in your terminal.
-
-        user@computer:~/example$ ls
-        holdout_data  holdout_outputs  model  python-example-2025  training_data
-
-        user@computer:~/example$ cd python-example-2025/
-
-        user@computer:~/example/python-example-2025$ docker build -t image .
-
-        Sending build context to Docker daemon  [...]kB
-        [...]
-        Successfully tagged image:latest
-
-        user@computer:~/example/python-example-2025$ docker run -it -v ~/example/model:/challenge/model -v ~/example/holdout_data:/challenge/holdout_data -v ~/example/holdout_outputs:/challenge/holdout_outputs -v ~/example/training_data:/challenge/training_data image bash
-
-        root@[...]:/challenge# ls
-            Dockerfile             holdout_outputs        run_model.py
-            evaluate_model.py      LICENSE                training_data
-            helper_code.py         README.md      
-            holdout_data           requirements.txt
-
-        root@[...]:/challenge# python train_model.py -d training_data -m model -v
-
-        root@[...]:/challenge# python run_model.py -d holdout_data -m model -o holdout_outputs -v
-
-        root@[...]:/challenge# python evaluate_model.py -d holdout_data -o holdout_outputs
-        [...]
-
-        root@[...]:/challenge# exit
-        Exit
-
-## What else do I need?
-
-This repository does not include code for evaluating your entry. Please see the [evaluation code repository](https://github.com/physionetchallenges/evaluation-2025) for code and instructions for evaluating your entry using the Challenge scoring metric.
-
-## How do I learn more? How do I share more?
-
-Please see the [Challenge website](https://physionetchallenges.org/2025/) for more details. Please post questions and concerns on the [Challenge discussion forum](https://groups.google.com/forum/#!forum/physionet-challenges). Please do not make pull requests, which may share information about your approach.
-
-## Useful links
-
-* [Challenge website](https://physionetchallenges.org/2025/)
-* [MATLAB example code](https://github.com/physionetchallenges/matlab-example-2025)
-* [Evaluation code](https://github.com/physionetchallenges/evaluation-2025)
-* [Frequently asked questions (FAQ) for this year's Challenge](https://physionetchallenges.org/2025/faq/)
-* [Frequently asked questions (FAQ) about the Challenges in general](https://physionetchallenges.org/faq/)
+# Fine-tune with Linear Probe
+trainer = LinearProbeTrainer(
+    encoder, signals_tensor, labels_array, save_path="linear_probe.pt",
+    batch_size=64, lr=1e-4, device="cuda"
+)
+trainer.train(epochs=5)
+```
