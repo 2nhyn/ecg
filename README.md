@@ -12,8 +12,8 @@ to perform binary classification.
 * Input length: variable length → unified by padding/clipping (4096)
 * Sampling rate: resampled to **400 Hz**
 * Core model: `ResNet1D + SE Block + Transformer Block` encoder, trained contrastively and then fine-tuned with a linear probe classifier
-
 All hyperparameters are decided empirically
+
 ---
 
 ## 2) Preprocessing
