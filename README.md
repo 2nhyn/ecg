@@ -28,16 +28,16 @@ The repository contains both official baseline scripts (provided by the challeng
 - **util_nh.py** → Core custom implementation: preprocessing (SignalProcessor), model architectures (ResNet1D, SEBlock1D, TransformerBlock1D), augmentation, dataset classes, and training helpers
 - requirements.txt → Python dependencies for reproducibility
 
----
+
 ## 3) Preprocessing
 #### `SignalProcessor`
 
 * Resample (→ 400 Hz)
 * Replace NaNs with finite values
-* **Bandpass filter**: 0.5–45 Hz (4th-order Butterworth)
-* **Notch filter**: 60 Hz powerline noise removal
+* Bandpass filter: 0.5–45 Hz (4th-order Butterworth)
+* Notch filter: 60 Hz powerline noise removal
 
-### Normalization
+#### Normalization
 
 ```python
 
@@ -47,7 +47,7 @@ def normalize_leads(arr):
 
 ```
 
-### Padding
+#### Padding
 * Pad all samples to shape `(max_len, num_leads)`
 
 
@@ -61,6 +61,25 @@ def normalize_leads(arr):
 * Random temporal shift (±5 samples)
 
 Used to generate two augmented views (v1, v2) for contrastive learning.
+
+```python
+def augment_signal_v2(x):
+    x = x + torch.randn_like(x) * 0.025
+    scale = torch.empty(1).uniform_(0.9, 1.1).to(x.device)
+    x = x * scale
+    t = x.size(1)
+    mask_len = int(t * 0.1)
+    start = torch.randint(0, t - mask_len, (1,)).item()
+    x[:, start:start + mask_len] = 0
+    shift = torch.randint(-5, 6, (1,)).item()
+    if shift > 0:
+        pad = torch.zeros(x.size(0), shift, device=x.device)
+        x = torch.cat([x[:, shift:], pad], dim=1)
+    elif shift < 0:
+        pad = torch.zeros(x.size(0), -shift, device=x.device)
+        x = torch.cat([pad, x[:, :shift]], dim=1)
+    return x
+```
 
 
 ## 5) Dataset Classes
@@ -111,7 +130,7 @@ Outputs:
 
 ## 8) Linear Probe Classifier
 
-### LinearProbeHead
+#### `LinearProbeHead`
 
 * 2-layer MLP:
 
@@ -119,7 +138,7 @@ Outputs:
   * Hidden: 128-d
   * Output: `num_classes` (default=2)
 
-### LinearProbeTrainer
+#### `LinearProbeTrainer`
 
 * Encoder is **frozen**; only the linear head is trained
 * Optimizer: Adam (`lr=1e-4`)
