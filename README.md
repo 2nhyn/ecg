@@ -1,24 +1,36 @@
 # ECG Contrastive + Linear Probe Classifier
-
 ## 1) Overview
 
-This project takes **12-lead ECG** signals as input and follows a two-stage pipeline:
+This project was developed while participating in PhysioNet Challenge 2025{https://moody-challenge.physionet.org/2025/}
 
-1. **Contrastive Pretraining** (self-supervised learning)
-2. **Linear Probe Supervised Fine-tuning**
+It takes 12-lead ECG signals as input and follows a two-stage pipeline:
+
+1. Contrastive Pretraining (self-supervised learning)
+
+2. Linear Probe Supervised Fine-tuning
 
 to perform binary classification.
 
-* Input length: variable length → unified by padding/clipping (4096)
-* Sampling rate: resampled to **400 Hz**
-* Core model: `ResNet1D + SE Block + Transformer Block` encoder, trained contrastively and then fine-tuned with a linear probe classifier
+- Input length: variable length → unified by padding/clipping (4096)
+- Sampling rate: resampled to 400 Hz
+- Core model: ResNet1D + SE Block + Transformer Block encoder, trained contrastively and then fine-tuned with a linear probe classifier
+
 All hyperparameters are decided empirically
 
+## 2) File Descriptions
+The repository contains both official baseline scripts (provided by the challenge organizers) and custom modules:
+
+- train_model.py → Baseline training entry script (provided)
+- run_model.py → Baseline inference entry script (provided)
+- evaluate_model.py → Evaluation script for computing challenge metrics (provided)
+- helper_code.py → Utility functions for data I/O and ECG header/signal parsing (provided)
+- **team_code.py** → Main file containing custom training pipeline (train_model function) and inference pipeline (run_model function)
+- **util_nh.py** → Core custom implementation: preprocessing (SignalProcessor), model architectures (ResNet1D, SEBlock1D, TransformerBlock1D), augmentation, dataset classes, and training helpers
+- requirements.txt → Python dependencies for reproducibility
+
 ---
-
-## 2) Preprocessing
-
-### `SignalProcessor`
+## 3) Preprocessing
+#### `SignalProcessor`
 
 * Resample (→ 400 Hz)
 * Replace NaNs with finite values
@@ -28,17 +40,20 @@ All hyperparameters are decided empirically
 ### Normalization
 
 ```python
+
 def normalize_leads(arr):
+
     (arr - mean) / std  # per-lead normalization
+
 ```
 
 ### Padding
-
 * Pad all samples to shape `(max_len, num_leads)`
 
----
 
-## 3) Data Augmentation (`augment_signal_v2`)
+## 4) Data Augmentation 
+
+#### `augment_signal_v2`
 
 * Add Gaussian noise
 * Random scaling (0.9 \~ 1.1)
@@ -47,9 +62,8 @@ def normalize_leads(arr):
 
 Used to generate two augmented views (v1, v2) for contrastive learning.
 
----
 
-## 4) Dataset Classes
+## 5) Dataset Classes
 
 * **ContrastiveECGDataset**:
   Takes one ECG signal and applies `augment_signal_v2` twice → returns (v1, v2).
@@ -57,9 +71,8 @@ Used to generate two augmented views (v1, v2) for contrastive learning.
 * **SupervisedECGDataset**:
   Returns (signal, label) pairs → used for linear probe training.
 
----
 
-## 5) Model Architecture
+## 6) Model Architecture
 
 ### (1) SEBlock1D
 
@@ -88,18 +101,15 @@ Outputs:
 * `x`: encoder feature (512-d)
 * `z`: projection head embedding (contrastive learning, normalized)
 
----
 
-## 6) Contrastive Loss: NT-Xent
+## 7) Contrastive Loss: NT-Xent
 
 * Input: `z1`, `z2` (augmentation pair)
 * Positive pairs: different views of the same sample
 * Negative pairs: all other samples in the batch
 * Softmax + CrossEntropy-based loss
 
----
-
-## 7) Linear Probe Classifier
+## 8) Linear Probe Classifier
 
 ### LinearProbeHead
 
@@ -118,9 +128,8 @@ Outputs:
   * `class_weights = [0.5, 1.0]` (to address class imbalance)
 * Model saving: `torch.save(self.head.state_dict(), save_path)`
 
----
 
-## 8) Training Flow
+## 9) Training Flow
 
 ### Phase 1: Contrastive Pretraining
 
@@ -134,18 +143,16 @@ Outputs:
 2. Load labeled ECG data via `SupervisedECGDataset`
 3. Train only the linear probe head with CrossEntropyLoss
 
----
 
-## 9) Key Design Choices
+## 10) Key Design Choices
 
 * **ResNet + SEBlock + Transformer**: combines local pattern extraction, channel attention, and global dependencies
 * Contrastive pretraining improves generalization on limited/noisy labels
 * Linear probe allows efficient use of labels
 * Design considers ECG-specific challenges (noise, variability, varying sequence lengths)
 
----
 
-## 10) Minimal Example
+## 11) Minimal Example
 
 ```python
 # Pretrain contrastive
